@@ -1,0 +1,247 @@
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+import matplotlib.pyplot as plt
+from google.colab import files
+import pandas as pd
+import ipywidgets as widgets
+from IPython.display import display
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import TensorDataset, DataLoader
+
+single_asp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/single%20correct%20aspiration%20curve.csv", delimiter=',',skiprows=1)
+correct_asp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/Correct%20Pipetting%20samples.csv", delimiter=',',skiprows=1)
+clot_asp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/Clot%20Aspiration%20samples.csv", delimiter=',',skiprows=1)
+Empty_asp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/pressure_profiles_Empty%20Well%20samples.csv", delimiter=',',skiprows=1)
+foam_asp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/pressure_profiles_Foam%20samples.csv", delimiter=',',skiprows=1)
+Correct_disp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/pressure_profiles_Correct%20Dispense%20samples.csv", delimiter=',',skiprows=1)
+Clot_disp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/pressure_profiles_Blood%20Clot%20dispense%20samples.csv", delimiter=',',skiprows=1)
+Short_disp=np.loadtxt("https://raw.githubusercontent.com/mfarat93/ECE5700-Project-/refs/heads/main/pressure_profiles_Short%20Samples.csv", delimiter=',',skiprows=1)
+
+class_map={
+    "correct_aspiration": 0,
+    "clot_aspiration": 1,
+    "empty_aspiration": 2,
+    "foamy_sample": 3,
+    "correct_dispense": 4,
+    "clot_dispense": 5,
+    "short_dispense": 6,
+}
+
+datasets=[
+    (correct_asp, class_map["correct_aspiration"]),
+    (clot_asp, class_map["clot_aspiration"]),
+    (Empty_asp, class_map["empty_aspiration"]),
+    (foam_asp, class_map["foamy_sample"]),
+    (Correct_disp, class_map["correct_dispense"]),
+    (Clot_disp, class_map["clot_dispense"]),
+    (Short_disp, class_map["short_dispense"]),
+]
+
+X_list=[]
+y_list=[]
+
+for data_matrix, label in datasets:
+    for i in range(1, data_matrix.shape[1]):
+        curve=data_matrix[:, i]
+        X_list.append(curve)
+        y_list.append(label)
+
+X=np.array(X_list)
+y=np.array(y_list)
+X=(X - np.mean(X, axis=1, keepdims=True)) / np.std(X, axis=1, keepdims=True)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+class Resnet(nn.Module):
+    def __init__(self, channels, kernel_size=3, dropout=0.3):
+        super().__init__()
+        self.conv1=nn.Conv1d(channels, channels, kernel_size, padding=kernel_size//2)
+        self.conv2=nn.Conv1d(channels, channels, kernel_size, padding=kernel_size//2)
+        self.relu=nn.ReLU()
+        self.dropout=nn.Dropout(dropout)
+
+    def forward(self, x):
+        identity=x
+        out =self.relu(self.conv1(x))
+        out=self.conv2(out)
+        out=self.dropout(out)
+        return self.relu(out + identity)
+
+class pipetteNN(nn.Module):
+    def __init__(self, input_length, num_classes=7, channels=16, num_blocks=3):
+        super().__init__()
+        self.input_conv= nn.Conv1d(1, channels, kernel_size=3, padding=1)
+        self.blocks= nn.Sequential(*[Resnet(channels) for _ in range(num_blocks)])
+        x=torch.zeros(1, 1, input_length)
+        x=self.input_conv(x)
+        x=self.blocks(x)
+        self.flat_size=x.view(1, -1).size(1)
+        self.fc1=nn.Linear(self.flat_size, 128)
+        self.fc2=nn.Linear(128, num_classes)
+        self.dropout=nn.Dropout(0.3)
+        self.relu=nn.ReLU()
+
+    def forward(self, x):
+        x=self.input_conv(x)
+        x= self.blocks(x)
+        x=x.view(x.size(0), -1)
+        x=self.dropout(self.relu(self.fc1(x)))
+        x=self.fc2(x)
+        return x
+
+X_train=np.expand_dims(X_train, axis=1)
+X_test= np.expand_dims(X_test, axis=1)
+net=pipetteNN(input_length=X_train.shape[2],num_classes=7)
+
+X_train_tensor=torch.tensor(X_train, dtype=torch.float32)
+X_test_tensor=torch.tensor(X_test, dtype=torch.float32)
+y_train_tensor=torch.tensor(y_train, dtype=torch.long)
+y_test_tensor=torch.tensor(y_test, dtype=torch.long)
+
+train_dataset=TensorDataset(X_train_tensor, y_train_tensor)
+test_dataset=TensorDataset(X_test_tensor, y_test_tensor)
+
+train_loader=DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_loader=DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+learning_rate=0.001
+optimizer=optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
+criterion=nn.CrossEntropyLoss()
+
+epochs=10
+
+for epoch in range(epochs):
+    net.train()
+    running_loss=0.0
+    for batch_idx, (x, target) in enumerate(train_loader):
+
+        optimizer.zero_grad()
+        out=net(x)
+        loss=criterion(out, target)
+        loss.backward()
+        optimizer.step()
+
+        running_loss+=loss.item() * x.size(0)
+
+        if batch_idx % 10 == 0:
+            print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.6f}")
+
+    epoch_loss=running_loss / len(train_dataset)
+
+correct = 0
+total = 0
+with torch.no_grad():
+    for i in range(len(X_test_tensor)):
+        input_tensor=X_test_tensor[i].unsqueeze(0)
+        output_net=net(input_tensor)
+        predicted_class=torch.argmax(output_net, dim=1).item()
+        if predicted_class==y_test[i]:
+            correct+=1
+        total+=1
+accuracy = correct / total
+print(f'The accuracy is {accuracy:.4f}')
+
+
+
+
+#################  GUI   ##################
+
+
+import gradio as gr
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import time
+
+net.eval()
+reverse_class_map = {v: k for k, v in class_map.items()}
+
+state = {"running": False, "current_idx": None, "auto": False}
+
+def generate_cycle():
+    idx = np.random.randint(0, X_test.shape[0])
+    curve = X_test[idx]
+
+    input_tensor = torch.tensor(curve, dtype=torch.float32).unsqueeze(0)
+    with torch.no_grad():
+        output_net = net(input_tensor)
+        probs = torch.softmax(output_net, dim=1)
+        predicted_class = torch.argmax(probs, dim=1).item()
+        confidence = probs[0][predicted_class].item()
+
+    predicted_label = reverse_class_map[predicted_class]
+    correct_label = reverse_class_map[y_test[idx]]
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(curve[0], linewidth=1)
+    ax.set_title("Current Pipette Cycle")
+    ax.set_xlabel("Time (ms)")
+    ax.set_ylabel("Pressure (Pa)")
+    ax.grid(True)
+
+    return idx, fig, predicted_label, correct_label, confidence
+
+def update_buttons(pred):
+    mapping = {
+        "empty_aspiration": ("Reload Sample", "Skip Sample"),
+        "foamy_sample": ("Skip Sample", "Bottom Touch-off"),
+        "clot_aspiration": ("Waste + Resample", "Eject Tip"),
+        "clot_dispense": ("Skip Sample", "Eject Tip"),
+        "short_dispense": ("Skip Sample", "Re-Aspirate"),
+    }
+    return mapping.get(pred, ("Option 1", "Option 2"))
+
+def next_step(trigger_auto=False):
+    if not state["running"]:
+        return None, "", "", "", gr.update(visible=False), "Option 1", "Option 2"
+
+    idx, fig, pred, correct, conf = generate_cycle()
+    state["current_idx"] = idx
+
+    if pred in ["correct_aspiration", "correct_dispense"]:
+        state["auto"] = True
+        if not trigger_auto:
+            time.sleep(3) 
+            return next_step(trigger_auto=True)
+        return fig, pred, correct, f"{conf:.2f}", gr.update(visible=False), "Option 1", "Option 2"
+
+    b1, b2 = update_buttons(pred)
+    state["auto"] = False
+    return fig, pred, correct, f"{conf:.2f}", gr.update(visible=True), b1, b2
+
+def handle_action(action):
+    print(f"Action Taken: {action}")
+    return next_step()
+
+def start():
+    state["running"] = True
+    return next_step()
+
+with gr.Blocks() as demo:
+    gr.Markdown("## Pipette QC Monitor (AI-Assisted)")
+
+    start_btn = gr.Button("Start")
+    plot = gr.Plot()
+    pred_text = gr.Textbox(label="Predicted Label")
+    correct_text = gr.Textbox(label="Correct Label")
+    conf_text = gr.Textbox(label="Confidence")
+
+    action_row = gr.Row(visible=False)
+    with action_row:
+        btn1 = gr.Button("Option 1")
+        btn2 = gr.Button("Option 2")
+
+    start_btn.click(fn=start, outputs=[plot, pred_text, correct_text, conf_text, action_row, btn1, btn2])
+    btn1.click(fn=lambda: handle_action(btn1.label),
+               outputs=[plot, pred_text, correct_text, conf_text, action_row, btn1, btn2])
+    btn2.click(fn=lambda: handle_action(btn2.label),
+               outputs=[plot, pred_text, correct_text, conf_text, action_row, btn1, btn2])
+
+demo.launch()
